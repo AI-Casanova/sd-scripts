@@ -549,9 +549,10 @@ class BaseDataset(torch.utils.data.Dataset):
     return image
   
   def latent_trim_and_resize_if_required(self, subset: BaseSubset, latent, reso, resized_size):
+    print(latent.shape)
     latent_height, latent_width = latent.shape[-2:]
-
-    if image_width != resized_size[0] or image_height != resized_size[1]:
+    print(latent_height,latent_width)
+    if latent_width != resized_size[0] or latent_height != resized_size[1]:
       # リサイズする
       latent = torch.nn.functional.interpolate(latent, size=(...,resized_size[1],resized_size[0]), mode="nearest",)
 
@@ -588,7 +589,13 @@ class BaseDataset(torch.utils.data.Dataset):
         continue
 
       image = self.load_image(info.absolute_path)
-      if not subset.random_crop:
+      if subset.random_crop:
+        print(image.shape)
+        if max(image.shape) > self.max_bucket_reso:
+          image = cv2.resize(image, (0,0), fx=(self.max_bucket_reso/max(image.shape)), fy=(self.max_bucket_reso/max(image.shape)), interpolation=cv2.INTER_AREA)
+          print(image.shape)
+
+      else:
         image = self.trim_and_resize_if_required(subset, image, info.bucket_reso, info.resized_size)
 
       img_tensor = self.image_transforms(image)
@@ -695,7 +702,9 @@ class BaseDataset(torch.utils.data.Dataset):
       if image_info.latents is not None:
         latents = image_info.latents if not subset.flip_aug or random.random() < .5 else image_info.latents_flipped
         if subset.random_crop:
-          latents = self.latent_trim_and_resize_if_required(subset, img, image_info.bucket_reso, image_info.resized_size)
+          print(f"Latents shape before crop: {latents.shape}")
+          latents = self.latent_trim_and_resize_if_required(subset, latents, image_info.bucket_reso, image_info.resized_size)
+          print(f"Latents shape after crop: {latents.shape}")
         image = None
       elif image_info.latents_npz is not None:
         latents = self.load_latents_from_npz(image_info, subset.flip_aug and random.random() >= .5)
