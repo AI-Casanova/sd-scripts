@@ -546,6 +546,14 @@ def train(args):
                         args.max_token_length // 75 if args.max_token_length else 1,
                         clip_skip=args.clip_skip,
                         )
+                      empty_captions = [""]*len(batch["captions"])
+                      uncond_hidden_states = get_weighted_text_embeddings(tokenizer,
+                        text_encoder,
+                        empty_captions,
+                        accelerator.device,
+                        args.max_token_length // 75 if args.max_token_length else 1,
+                        clip_skip=args.clip_skip,
+                        )
                     else:
                       input_ids = batch["input_ids"].to(accelerator.device)
                       encoder_hidden_states = train_util.get_hidden_states(args, input_ids, tokenizer, text_encoder, weight_dtype)
@@ -564,7 +572,10 @@ def train(args):
 
                 # Predict the noise residual
                 with accelerator.autocast():
-                    noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+                    cond_noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+                    uncond_noise_pred = unet(noisy_latents, timesteps, uncond_hidden_states).sample
+                CFG = 7
+                noise_pred = uncond_noise_pred + CFG * (cond_noise_pred - uncond_noise_pred)
 
                 if args.v_parameterization:
                     # v-parameterization training
