@@ -574,8 +574,8 @@ def train(args):
                 with accelerator.autocast():
                     cond_noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
                     uncond_noise_pred = unet(noisy_latents, timesteps, uncond_hidden_states).sample
-                CFG = 7
-                noise_pred = uncond_noise_pred + CFG * (cond_noise_pred - uncond_noise_pred)
+                CFG = 2
+                noise_pred = cond_noise_pred + CFG * (cond_noise_pred - uncond_noise_pred)
 
                 if args.v_parameterization:
                     # v-parameterization training
