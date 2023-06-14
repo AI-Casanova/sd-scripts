@@ -100,6 +100,8 @@ class ImageInfo:
         self.latents_flipped: torch.Tensor = None
         self.latents_npz: str = None
         self.latents_npz_flipped: str = None
+        self.mask: np.ndarray = None
+        self.mask_flipped: np.ndarray = None
 
 
 class BucketManager:
@@ -697,11 +699,32 @@ class BaseDataset(torch.utils.data.Dataset):
         random.shuffle(self.buckets_indices)
         self.bucket_manager.shuffle()
 
+    def load_mask(self, path):
+        try:
+            p = pathlib.Path(path)
+            mask_path = os.path.join(p.parent, 'mask', p.stem + '.png')
+            mask = np.array(Image.open(mask_path))
+            if len(mask.shape) > 2 and mask.max() <= 255:
+                print(mask.shape)
+                return np.array(Image.open(mask_path).convert("L"))
+            elif len(mask.shape) == 2 and mask.max() > 255:
+                print(mask.max())
+                return mask // (((2 ** 16) - 1) // 255)
+            elif len(mask.shape) == 2 and mask.max() <= 255:
+                return mask
+            else:
+                print(f"{mask_path} has invalid mask format: Defaulting to no mask")
+                return np.ones_like(np.array(Image.open(path).convert("L"))) * 255
+        except:
+            print(f"{mask_path} not found: Defaulting to no mask")
+        return np.ones_like(np.array(Image.open(path).convert("L"))) * 255
+
     def load_image(self, image_path):
         image = Image.open(image_path)
-        if not image.mode == "RGB":
-            image = image.convert("RGB")
+        if not image.mode == "RGBA":
+            image = image.convert("RGBA")
         img = np.array(image, np.uint8)
+        img[..., -1] = self.load_mask(image_path)
         return img
 
     def trim_and_resize_if_required(self, subset: BaseSubset, image, reso, resized_size):
@@ -802,31 +825,37 @@ class BaseDataset(torch.utils.data.Dataset):
         # iterate batches
         for batch in tqdm(batches, smoothing=1, total=len(batches)):
             images = []
+            masks = []
             for info in batch:
                 image = self.load_image(info.absolute_path)
                 image = self.trim_and_resize_if_required(subset, image, info.bucket_reso, info.resized_size)
+                mask = image[:, :, -1] / 255  # grab alpha channel
+                image = image[:, :, :3]  # drop alpha channel
                 image = self.image_transforms(image)
                 images.append(image)
+                masks.append(mask)
 
             img_tensors = torch.stack(images, dim=0)
             img_tensors = img_tensors.to(device=vae.device, dtype=vae.dtype)
 
             latents = vae.encode(img_tensors).latent_dist.sample().to("cpu")
 
-            for info, latent in zip(batch, latents):
+            for info, latent, mask in zip(batch, latents, masks):
                 if cache_to_disk:
                     np.savez(info.latents_npz, latent.float().numpy())
                 else:
                     info.latents = latent
+                    info.mask = mask
 
             if subset.flip_aug:
                 img_tensors = torch.flip(img_tensors, dims=[3])
                 latents = vae.encode(img_tensors).latent_dist.sample().to("cpu")
-                for info, latent in zip(batch, latents):
+                for info, latent, mask in zip(batch, latents, masks):
                     if cache_to_disk:
                         np.savez(info.latents_npz_flipped, latent.float().numpy())
                     else:
                         info.latents_flipped = latent
+                        info.mask_flipped = mask
 
     def get_image_size(self, image_path):
         image = Image.open(image_path)
@@ -913,6 +942,7 @@ class BaseDataset(torch.utils.data.Dataset):
         input_ids_list = []
         latents_list = []
         images = []
+        masks = []
 
         for image_key in bucket[image_index : image_index + bucket_batch_size]:
             image_info = self.image_data[image_key]
@@ -921,7 +951,9 @@ class BaseDataset(torch.utils.data.Dataset):
 
             # image/latentsを処理する
             if image_info.latents is not None:  # cache_latents=Trueの場合
-                latents = image_info.latents if not subset.flip_aug or random.random() < 0.5 else image_info.latents_flipped
+                rand_flip = random.random()
+                latents = image_info.latents if not subset.flip_aug or rand_flip < .5 else image_info.latents_flipped
+                mask = image_info.mask if not subset.flip_aug or rand_flip < .5 else image_info.mask_flipped
                 image = None
             elif image_info.latents_npz is not None:  # FineTuningDatasetまたはcache_latents_to_disk=Trueの場合
                 latents = self.load_latents_from_npz(image_info, subset.flip_aug and random.random() >= 0.5)
@@ -930,6 +962,8 @@ class BaseDataset(torch.utils.data.Dataset):
             else:
                 # 画像を読み込み、必要ならcropする
                 img, face_cx, face_cy, face_w, face_h = self.load_image_with_face_info(subset, image_info.absolute_path)
+                mask = img[:, :, -1] / 255  # grab alpha channel
+                img = img[:, :, :3]  # drop alpha channel
                 im_h, im_w = img.shape[0:2]
 
                 if self.enable_bucket:
@@ -960,8 +994,10 @@ class BaseDataset(torch.utils.data.Dataset):
 
                 latents = None
                 image = self.image_transforms(img)  # -1.0~1.0のtorch.Tensorになる
+                mask = torch.from_numpy(mask)
 
             images.append(image)
+            masks.append(torch.tensor(mask))
             latents_list.append(latents)
 
             caption = self.process_caption(subset, image_info.caption)
@@ -998,7 +1034,7 @@ class BaseDataset(torch.utils.data.Dataset):
         else:
             images = None
         example["images"] = images
-
+        example["masks"] = torch.stack(masks) if masks[0] is not None else None
         example["latents"] = torch.stack(latents_list) if latents_list[0] is not None else None
         example["captions"] = captions
 
@@ -2387,6 +2423,8 @@ def add_dataset_arguments(
     parser.add_argument(
         "--bucket_no_upscale", action="store_true", help="make bucket for each image without upscaling / 画像を拡大せずbucketを作成します"
     )
+
+    parser.add_argument("--masked_loss", action="store_true", help="Enable Masked Loss from Mask File")
 
     parser.add_argument(
         "--token_warmup_min",
