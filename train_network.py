@@ -11,6 +11,7 @@ from multiprocessing import Value
 
 from tqdm import tqdm
 import torch
+import torch.nn.functional
 from accelerate.utils import set_seed
 from diffusers import DDPMScheduler
 
@@ -667,6 +668,26 @@ def train(args):
                 else:
                     target = noise
 
+                if args.masked_loss and batch['masks'] is not None:
+                    mask = (
+                        batch['masks']
+                        .to(noise_pred.device)
+                        .reshape(
+                            noise_pred.shape[0], 1, noise_pred.shape[2] * 8, noise_pred.shape[3] * 8
+                        )
+                    )
+                    # resize to match noise_pred
+                    mask = torch.nn.functional.interpolate(
+                        mask.float(),
+                        size=noise_pred.shape[-2:],
+                        mode="nearest",
+                    )
+
+                    mask = mask / mask.mean()
+
+                    noise_pred = noise_pred * mask
+                    target = target * mask
+
                 loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
                 loss = loss.mean([1, 2, 3])
 
@@ -730,6 +751,7 @@ def train(args):
             loss_total += current_loss
             avr_loss = loss_total / len(loss_list)
             logs = {"loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+
             progress_bar.set_postfix(**logs)
 
             if args.scale_weight_norms:
